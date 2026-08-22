@@ -1,0 +1,2 @@
+# pumpbot
+bot pump.fun
