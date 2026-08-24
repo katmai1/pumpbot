@@ -1,0 +1,35 @@
+# Copia este archivo como config.toml (sin el .example) y rellena tus valores
+# reales. config.toml NUNCA debe subirse a git ni compartirse con nadie
+# (ya está en el .gitignore).
+
+[credentials]
+pumpportal_api_key = "tu_api_key_real_aqui"
+helium_api_key = "tu_helius_key_aqui"
+
+[scanner]
+observation_window_seconds = 60     # límite MÁXIMO antes de descartar (fallback)
+early_trigger_min_seconds = 10      # no compra antes de esto (necesita algo de dato)
+max_dev_holding_pct = 8.0           # % máx. del supply que el dev puede comprarse al crear
+min_unique_buyers = 10
+min_buy_sell_ratio = 1.5
+min_bonding_curve_progress = 1.0
+max_bonding_curve_progress = 70.0
+
+[executor]
+buy_amount_sol = 0.01               # tamaño de la posición simulada (o real, si usas RealTradeExecutor)
+take_profit_pct = 50.0
+stop_loss_pct = 25.0
+grace_period_seconds = 15           # tras comprar, ignora TP/SL este tiempo
+max_hold_seconds = 3600             # cierre de seguridad si nunca toca TP/SL
+position_status_every_n_trades = 5  # frecuencia del print de P&L en vivo
+
+[pumpfun]
+total_supply = 1000000000           # supply estándar de un token de pump.fun
+migration_sol_threshold = 85.0      # SOL acumulado al que migra a Raydium/PumpSwap
+                                     # (puede cambiar si pump.fun ajusta parámetros)
+
+[logging]
+verbose = false                     # true = muestra detecciones, descartes, [SERVIDOR]...
+debug_raw = false                   # true = imprime TODOS los mensajes crudos del WebSocket
+candidates_csv_path = "candidates_log.csv"
+positions_csv_path = "positions_log.csv"
