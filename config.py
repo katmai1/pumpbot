@@ -12,7 +12,7 @@ class Config:
     # Se cargan desde config.toml (ver Config.from_toml) — NUNCA hardcodees
     # aquí tu key ni tu RPC real, y NUNCA los pegues en un chat, log o repo.
     pumpportal_api_key: str = ""
-    helium_api_key: str = ""
+    helius_api_key: str = ""
  
     # --- ventanas de tiempo (filtro / scanner) ---
     observation_window_seconds: int = 60   # límite MÁXIMO antes de descartar (fallback)
@@ -49,7 +49,7 @@ class Config:
     
     @property
     def solana_rpc_url(self) -> str:
-        return f"https://mainnet.helius-rpc.com/?api-key={self.helium_api_key}"
+        return f"https://mainnet.helius-rpc.com/?api-key={self.helius_api_key}"
  
     @classmethod
     def from_toml(cls, path: str = "config.toml") -> "Config":
@@ -79,8 +79,8 @@ class Config:
         missing = []
         if not self.pumpportal_api_key:
             missing.append("pumpportal_api_key")
-        if not self.helium_api_key:
-            missing.append("helium_api_key")
+        if not self.helius_api_key:
+            missing.append("helius_api_key")
         if missing:
             raise RuntimeError(
                 f"Faltan valores en config.toml: {', '.join(missing)}."
