@@ -33,13 +33,33 @@ Configuración necesaria (ver clase Config):
 import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+import argparse
 
-from config import Config, _mask_key
-from pump import PumpFunScanner
-from executors import SimulatedTradeExecutor
+from pumpbot.config import Config, _mask_key
+from pumpbot.pump import PumpFunScanner
+from pumpbot.executors import SimulatedTradeExecutor
+
+def configure_parser():
+    parser = argparse.ArgumentParser(description="Bot para Pump.Fun")
+    parser.add_argument(
+        "-c", "--config",
+        default="config.toml"
+    )
+    
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Activa el modo verbose"
+    )
+    
+    return parser.parse_args()
+
 
 if __name__ == "__main__":
-    config = Config.from_toml("config.toml")
+    args = configure_parser()
+    
+    config = Config.from_toml(args.config)
+    config.verbose = args.verbose
     config.validate()
 
     

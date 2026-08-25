@@ -29,7 +29,6 @@ migration_sol_threshold = 85.0      # SOL acumulado al que migra a Raydium/PumpS
                                      # (puede cambiar si pump.fun ajusta parámetros)
 
 [logging]
-verbose = false                     # true = muestra detecciones, descartes, [SERVIDOR]...
 debug_raw = false                   # true = imprime TODOS los mensajes crudos del WebSocket
 candidates_csv_path = "candidates_log.csv"
 positions_csv_path = "positions_log.csv"

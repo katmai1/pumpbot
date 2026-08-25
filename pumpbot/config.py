@@ -52,13 +52,13 @@ class Config:
         return f"https://mainnet.helius-rpc.com/?api-key={self.helius_api_key}"
  
     @classmethod
-    def from_toml(cls, path: str = "config.toml") -> "Config":
+    def from_toml(cls, path) -> "Config":
         """Carga la configuración desde un archivo TOML (ver config.example.toml
         como plantilla). El archivo real (config.toml) NUNCA debe subirse a git
         — está en el .gitignore que te dejé."""
         if not os.path.exists(path):
             raise RuntimeError(
-                f"No se encontró {path}. Copia config.example.toml a config.toml "
+                f"No se encontró {path}. Copia config.example.toml a {path} "
                 f"y rellena tus valores reales (API key, RPC, etc.)."
             )
         with open(path, "rb") as f:

@@ -6,7 +6,7 @@ import os
 import asyncio
 import csv
 
-from config import Config
+from pumpbot.config import Config
 
 @dataclass
 class Position:
