@@ -66,9 +66,12 @@ if __name__ == "__main__":
     print("=" * 70)
     print("SIMULACIÓN (PAPERTRADING) — NO SE EJECUTA NINGUNA COMPRA/VENTA REAL.")
     print(f"API key: {_mask_key(config.pumpportal_api_key)}  |  RPC: {config.solana_rpc_url[:30]}...")
-    print(f"Posición simulada: {config.buy_amount_sol} SOL | TP +{config.take_profit_pct}% | "
-          f"SL -{config.stop_loss_pct}% | gracia {config.grace_period_seconds}s | "
+    print(f"Posición simulada: {config.buy_amount_sol} SOL | TP +{config.take_profit_pct}% "
+          f"(gracia {config.take_profit_grace_period_seconds}s) | "
+          f"SL -{config.stop_loss_pct}% (gracia {config.stop_loss_grace_period_seconds}s) | "
           f"timeout {config.max_hold_seconds}s")
+    print(f"Límites de exposición: máx. {config.max_concurrent_positions} posiciones concurrentes | "
+          f"máx. {config.max_total_exposure_sol} SOL en riesgo simultáneo")
     print("Riesgo extremo de pérdida total si en el futuro conectas esto a dinero real.")
     print("=" * 70 + "\n")
 

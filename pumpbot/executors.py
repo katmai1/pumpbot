@@ -77,6 +77,28 @@ class TradeExecutor(ABC):
     def has_open_position(self, mint: str) -> bool:
         return mint in self.open_positions
 
+    def _check_exposure_limits(self) -> Optional[str]:
+        """Comprueba si abrir UNA posición más de tamaño cfg.buy_amount_sol
+        violaría los límites de riesgo configurados. Devuelve el motivo de
+        rechazo como str, o None si es seguro abrir.
+
+        Se comprueba en la clase base (no en cada subclase) para que tanto
+        SimulatedTradeExecutor como RealTradeExecutor respeten SIEMPRE estos
+        límites sin poder olvidarse de llamarlo — real y simulado comparten
+        la misma disciplina de riesgo."""
+        cfg = self.cfg
+        if len(self.open_positions) >= cfg.max_concurrent_positions:
+            return (f"límite de posiciones concurrentes alcanzado "
+                     f"({len(self.open_positions)}/{cfg.max_concurrent_positions})")
+
+        current_exposure = sum(p.amount_sol for p in self.open_positions.values())
+        projected = current_exposure + cfg.buy_amount_sol
+        if projected > cfg.max_total_exposure_sol:
+            return (f"excedería exposición máxima "
+                     f"({current_exposure:.4f} + {cfg.buy_amount_sol} = {projected:.4f} "
+                     f"> {cfg.max_total_exposure_sol} SOL)")
+        return None
+
     @abstractmethod
     async def open_position(self, candidate) -> bool:
         """Intenta abrir posición en el candidato. Devuelve True si se abrió."""
@@ -127,6 +149,11 @@ class SimulatedTradeExecutor(TradeExecutor):
             ])
 
     async def open_position(self, candidate) -> bool:
+        rejection = self._check_exposure_limits()
+        if rejection:
+            print(f"[SIM] Compra de {candidate.symbol} descartada: {rejection}.")
+            return False
+
         price = candidate.current_price
         if not price:
             print(f"[SIM] No se pudo abrir posición en {candidate.symbol}: precio desconocido.")
@@ -140,8 +167,8 @@ class SimulatedTradeExecutor(TradeExecutor):
         )
         self.open_positions[candidate.mint] = position
         print(f"[SIM COMPRA] {position.symbol} ({position.mint[:10]}...) — {cfg.buy_amount_sol} SOL @ "
-              f"{price:.10f} SOL/token → TP +{cfg.take_profit_pct}% / SL -{cfg.stop_loss_pct}% "
-              f"(gracia {cfg.grace_period_seconds}s)")
+              f"{price:.10f} SOL/token → TP +{cfg.take_profit_pct}% (gracia {cfg.take_profit_grace_period_seconds}s) "
+              f"/ SL -{cfg.stop_loss_pct}% (gracia {cfg.stop_loss_grace_period_seconds}s)")
 
         # la posición ya estaba suscrita a trades desde el scanner (para poder
         # evaluarla), así que no hace falta volver a suscribirse aquí
@@ -174,14 +201,13 @@ class SimulatedTradeExecutor(TradeExecutor):
         elapsed = time.time() - p.entry_time
         pnl_pct = p.pnl_pct()
 
-        if elapsed < cfg.grace_period_seconds:
-            if elapsed >= cfg.max_hold_seconds:
-                return f"timeout {cfg.max_hold_seconds}s ({pnl_pct:+.1f}%)"
-            return None
-
-        if pnl_pct >= cfg.take_profit_pct:
+        # TP y SL tienen su propia ventana de gracia, independiente entre sí:
+        # puedes, por ejemplo, dejar el SL activo casi desde el minuto uno
+        # (para cortar rug pulls rápido) mientras le das más margen al TP
+        # (para no vender demasiado pronto una subida que sigue corriendo).
+        if elapsed >= cfg.take_profit_grace_period_seconds and pnl_pct >= cfg.take_profit_pct:
             return f"take-profit +{pnl_pct:.1f}%"
-        if pnl_pct <= -cfg.stop_loss_pct:
+        if elapsed >= cfg.stop_loss_grace_period_seconds and pnl_pct <= -cfg.stop_loss_pct:
             return f"stop-loss {pnl_pct:.1f}%"
         if elapsed >= cfg.max_hold_seconds:
             return f"timeout {cfg.max_hold_seconds}s ({pnl_pct:+.1f}%)"
@@ -222,7 +248,11 @@ class RealTradeExecutor(TradeExecutor):
       - Simulación previa de cada transacción (para detectar honeypots
         antes de firmarla de verdad).
       - Manejo de errores de red / transacción fallida sin duplicar compras.
-      - Límite de capital total en riesgo simultáneo (no solo por posición).
+
+    El límite de capital total en riesgo simultáneo YA está resuelto a nivel
+    de la clase base (ver TradeExecutor._check_exposure_limits): tanto esta
+    clase como SimulatedTradeExecutor respetan cfg.max_concurrent_positions
+    y cfg.max_total_exposure_sol automáticamente.
 
     Recomendación: corre SimulatedTradeExecutor un tiempo largo primero y
     valida que positions_log.csv da un resultado que te convence antes de
@@ -237,6 +267,11 @@ class RealTradeExecutor(TradeExecutor):
                   "open_position() fallará hasta que la configures.")
 
     async def open_position(self, candidate) -> bool:
+        rejection = self._check_exposure_limits()
+        if rejection:
+            print(f"[REAL] Compra de {candidate.symbol} descartada: {rejection}.")
+            return False
+
         if not self.wallet_private_key:
             print(f"[REAL] Compra de {candidate.symbol} abortada: falta wallet_private_key.")
             return False

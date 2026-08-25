@@ -29,9 +29,13 @@ class Config:
     buy_amount_sol: float = 0.01
     take_profit_pct: float = 50.0
     stop_loss_pct: float = 25.0
+    stop_loss_grace_period_seconds: int = 15   # tras comprar, ignora el SL este tiempo
+    take_profit_grace_period_seconds: int = 15 # tras comprar, ignora el TP este tiempo
     grace_period_seconds: int = 15    # tras comprar, ignora TP/SL este tiempo
     max_hold_seconds: int = 3600      # cierre de seguridad si nunca toca TP/SL
     position_status_every_n_trades: int = 5
+    max_concurrent_positions: int = 5     # nº máx. de posiciones abiertas a la vez
+    max_total_exposure_sol: float = 0.05  # SOL máx. sumando TODAS las posiciones abiertas
  
     # --- constantes del propio pump.fun ---
     total_supply: float = 1_000_000_000
