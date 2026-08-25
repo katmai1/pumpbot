@@ -1,9 +1,9 @@
 import time
-import requests
 import os
 import csv
 import json
 import asyncio
+import aiohttp
 import websockets
 from dataclasses import dataclass, field
 from typing import Optional
@@ -82,6 +82,10 @@ class PumpFunScanner:
         self.candidate_shortlist: list[TokenCandidate] = []
         self._warned_missing_curve_fields = False
         self._ws = None
+        # Sesión aiohttp reutilizada para TODAS las llamadas RPC (evita abrir
+        # una conexión TCP nueva por request y permite que las llamadas RPC
+        # sean no bloqueantes de verdad, sin congelar el bucle del WebSocket).
+        self._http_session: Optional[aiohttp.ClientSession] = None
  
         self._ensure_candidates_csv_header()
  
@@ -89,26 +93,43 @@ class PumpFunScanner:
     # RPC de Solana (seguridad: mint/freeze authority)
     # ------------------------------------------------------------------
  
-    def _rpc_call_with_retry(self, method: str, params: list,
-                              max_retries: int = 5, delay: float = 2.0) -> dict:
+    async def _get_http_session(self) -> aiohttp.ClientSession:
+        if self._http_session is None or self._http_session.closed:
+            self._http_session = aiohttp.ClientSession()
+        return self._http_session
+
+    async def close(self):
+        """Cierra recursos externos (sesión HTTP). Llamar al parar el bot."""
+        if self._http_session and not self._http_session.closed:
+            await self._http_session.close()
+
+    async def _rpc_call_with_retry(self, method: str, params: list,
+                                    max_retries: int = 5, delay: float = 2.0) -> dict:
+        """Versión async: usa aiohttp + asyncio.sleep, así que mientras espera
+        respuesta de Helius o reintenta, el bucle de eventos sigue libre para
+        seguir leyendo mensajes del WebSocket en paralelo (antes, con
+        `requests` + `time.sleep`, esto bloqueaba TODO el proceso, incluida
+        la recepción de trades, hasta 10s por candidato)."""
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        session = await self._get_http_session()
         last_result = {}
         for _ in range(max_retries):
             try:
-                resp = requests.post(self.cfg.solana_rpc_url, json=payload, timeout=8)
-                data = resp.json()
+                timeout = aiohttp.ClientTimeout(total=8)
+                async with session.post(self.cfg.solana_rpc_url, json=payload, timeout=timeout) as resp:
+                    data = await resp.json()
                 if "error" in data or data.get("result", {}).get("value") is None:
                     last_result = data
-                    time.sleep(delay)
+                    await asyncio.sleep(delay)
                     continue
                 return data
             except Exception as e:
                 last_result = {"error": f"{type(e).__name__}: {e}"}
-                time.sleep(delay)
+                await asyncio.sleep(delay)
         return last_result
  
-    def _get_mint_authorities(self, mint: str) -> dict:
-        data = self._rpc_call_with_retry(
+    async def _get_mint_authorities(self, mint: str) -> dict:
+        data = await self._rpc_call_with_retry(
             "getAccountInfo", [mint, {"encoding": "jsonParsed", "commitment": "confirmed"}]
         )
         if "error" in data or not data.get("result", {}).get("value"):
@@ -117,8 +138,8 @@ class PumpFunScanner:
         info = data["result"]["value"]["data"]["parsed"]["info"]
         return {"mint_authority": info.get("mintAuthority"), "freeze_authority": info.get("freezeAuthority")}
  
-    def _run_security_check(self, candidate: TokenCandidate):
-        auth = self._get_mint_authorities(candidate.mint)
+    async def _run_security_check(self, candidate: TokenCandidate):
+        auth = await self._get_mint_authorities(candidate.mint)
         candidate.mint_authority_revoked = auth["mint_authority"] is None
         candidate.freeze_authority_revoked = auth["freeze_authority"] is None
  
@@ -275,7 +296,7 @@ class PumpFunScanner:
         if self.cfg.verbose:
             print(f"[NUEVO] {candidate.symbol} ({mint[:10]}...) detectado...")
  
-        self._run_security_check(candidate)  # bloqueante (RPC síncrono, gratuito)
+        await self._run_security_check(candidate)  # async: no bloquea el loop mientras espera al RPC
  
         if not self._passes_prefilter(candidate):
             # descartado SIN suscribirnos a trades: nos ahorramos la cuota de pago
@@ -334,6 +355,14 @@ class PumpFunScanner:
         (caída de red puntual, el servidor cierra sin avisar, etc.)."""
         backoff = 3
         max_backoff = 60
+        try:
+            await self._run_forever(backoff, max_backoff)
+        finally:
+            # Se ejecuta también en KeyboardInterrupt/cancelación: no queremos
+            # dejar la conexión HTTP a Helius abierta colgando.
+            await self.close()
+
+    async def _run_forever(self, backoff: int, max_backoff: int):
         while True:
             try:
                 await self._run_once()

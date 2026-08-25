@@ -23,7 +23,7 @@ ESTE SCRIPT, TAL CUAL VIENE CONFIGURADO, NO EJECUTA NINGUNA COMPRA/VENTA
 REAL. Usa SimulatedTradeExecutor por defecto.
 
 Requisitos:
-    pip install websockets requests
+    pip install -r requirements.txt   (websockets, aiohttp — ver ese archivo)
 
 Configuración necesaria (ver clase Config):
   1. pumpportal_api_key -> gratis en https://pumpportal.fun/trading-api/setup

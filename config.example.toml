@@ -4,7 +4,7 @@
 
 [credentials]
 pumpportal_api_key = "tu_api_key_real_aqui"
-helium_api_key = "tu_helius_key_aqui"
+helius_api_key = "tu_helius_key_aqui"
 
 [scanner]
 observation_window_seconds = 60     # límite MÁXIMO antes de descartar (fallback)
