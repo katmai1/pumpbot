@@ -558,7 +558,7 @@ class PumpFunScanner:
                     logger.debug(f"[RAW] {json.dumps(msg)[:300]}")
 
                 if "mint" in msg and msg.get("txType") == "create":
-                    await self._handle_new_token(msg)
+                    asyncio.create_task(self._handle_new_token(msg))
                 elif msg.get("txType") in ("buy", "sell"):
                     self._handle_token_trade(msg)
                 elif "message" in msg:
