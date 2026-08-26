@@ -5,6 +5,10 @@
 [credentials]
 pumpportal_api_key = "tu_api_key_real_aqui"
 helius_api_key = "tu_helius_key_aqui"
+# Solo necesarios si vas a usar --real (RealTradeExecutor / Local Transaction API).
+# pumpportal_wallet_private es tu clave privada en base58 (la de un keypair de
+# Solana normal, NO la credencial del Lightning Wallet de PumpPortal).
+# NUNCA la subas a git ni la compartas — quien la tenga controla los fondos.
 pumpportal_wallet_private = ""
 pumpportal_wallet_public = ""
 
@@ -29,6 +33,13 @@ max_hold_seconds = 3600             # cierre de seguridad si nunca toca TP/SL
 position_status_every_n_trades = 5  # frecuencia del print de P&L en vivo
 max_concurrent_positions = 5        # nº máx. de posiciones abiertas a la vez
 max_total_exposure_sol = 0.05       # SOL máx. sumando TODAS las posiciones abiertas a la vez
+
+# --- solo aplica si corres con --real (RealTradeExecutor) ---
+max_slippage_pct = 10.0             # % de slippage máx. aceptado en compra/venta
+priority_fee_sol = 0.0005           # SOL de priority fee por transacción
+trade_pool = "auto"                 # 'pump', 'raydium', 'pump-amm', 'auto', etc.
+tx_confirm_timeout_seconds = 10.0   # tiempo máx. esperando confirmación on-chain
+tx_confirm_poll_interval_seconds = 2.0
 
 [pumpfun]
 total_supply = 1000000000           # supply estándar de un token de pump.fun

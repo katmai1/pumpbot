@@ -3,8 +3,11 @@ from dataclasses import dataclass, field
 from typing import Optional, Callable, Awaitable
 import time
 import asyncio
+import base64
 import csv
 import logging
+
+import aiohttp
 
 from pumpbot.config import Config
 
@@ -142,6 +145,52 @@ class TradeExecutor(ABC):
         lines.append("=" * 80)
         logger.info("\n" + "\n".join(lines))
 
+    # ------------------------------------------------------------------
+    # Lógica compartida entre Simulated y Real: condiciones de salida
+    # (TP/SL/timeout) y registro en CSV. Vive aquí para que AMBOS
+    # executors respeten exactamente las mismas reglas — solo cambia
+    # CÓMO se ejecuta la compra/venta en sí (ver cada subclase).
+    # ------------------------------------------------------------------
+
+    def _check_exit_conditions(self, p: Position) -> Optional[str]:
+        cfg = self.cfg
+        price = p.current_price
+        if not price:
+            return None
+
+        elapsed = time.time() - p.entry_time
+        pnl_pct = p.pnl_pct()
+
+        # TP y SL tienen su propia ventana de gracia, independiente entre sí:
+        # puedes, por ejemplo, dejar el SL activo casi desde el minuto uno
+        # (para cortar rug pulls rápido) mientras le das más margen al TP
+        # (para no vender demasiado pronto una subida que sigue corriendo).
+        if elapsed >= cfg.take_profit_grace_period_seconds and pnl_pct >= cfg.take_profit_pct:
+            return f"take-profit +{pnl_pct:.1f}%"
+        if elapsed >= cfg.stop_loss_grace_period_seconds and pnl_pct <= -cfg.stop_loss_pct:
+            return f"stop-loss {pnl_pct:.1f}%"
+        if elapsed >= cfg.max_hold_seconds:
+            return f"timeout {cfg.max_hold_seconds}s ({pnl_pct:+.1f}%)"
+        return None
+
+    def _ensure_positions_csv_header(self):
+        with open(self.cfg.positions_csv_path, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "entry_time", "exit_time", "hold_seconds", "mint", "symbol",
+                "entry_price_sol", "exit_price_sol", "pnl_pct", "pnl_sol",
+                "exit_reason", "tx_signature", "pumpfun_url",
+            ])
+
+    def _append_position_csv(self, p: Position, exit_price: float, pnl_pct: float,
+                              pnl_sol: float, exit_reason: str, tx_signature: str = ""):
+        with open(self.cfg.positions_csv_path, "a", newline="") as f:
+            csv.writer(f).writerow([
+                int(p.entry_time), int(time.time()), int(time.time() - p.entry_time),
+                p.mint, p.symbol, p.entry_price, exit_price,
+                round(pnl_pct, 2), round(pnl_sol, 5), exit_reason, tx_signature,
+                f"https://pump.fun/{p.mint}",
+            ])
+
 
 class SimulatedTradeExecutor(TradeExecutor):
     """Papertrading: simula la compra/venta sobre precios reales de la
@@ -150,24 +199,6 @@ class SimulatedTradeExecutor(TradeExecutor):
     def __init__(self, config: Config):
         super().__init__(config)
         self._ensure_positions_csv_header()
-
-    def _ensure_positions_csv_header(self):
-        with open(self.cfg.positions_csv_path, "w", newline="") as f:
-            csv.writer(f).writerow([
-                "entry_time", "exit_time", "hold_seconds", "mint", "symbol",
-                "entry_price_sol", "exit_price_sol", "pnl_pct", "pnl_sol",
-                "exit_reason", "pumpfun_url",
-            ])
-
-    def _append_position_csv(self, p: Position, exit_price: float,
-                              pnl_pct: float, pnl_sol: float, exit_reason: str):
-        with open(self.cfg.positions_csv_path, "a", newline="") as f:
-            csv.writer(f).writerow([
-                int(p.entry_time), int(time.time()), int(time.time() - p.entry_time),
-                p.mint, p.symbol, p.entry_price, exit_price,
-                round(pnl_pct, 2), round(pnl_sol, 5), exit_reason,
-                f"https://pump.fun/{p.mint}",
-            ])
 
     async def open_position(self, candidate) -> bool:
         rejection = self._check_exposure_limits()
@@ -213,27 +244,6 @@ class SimulatedTradeExecutor(TradeExecutor):
                     logger.info(f"[SIM ESTADO] {position.symbol} sigue abierta — "
                                 f"P&L actual: {pnl_pct:+.1f}% ({time.time() - position.entry_time:.0f}s)")
 
-    def _check_exit_conditions(self, p: Position) -> Optional[str]:
-        cfg = self.cfg
-        price = p.current_price
-        if not price:
-            return None
-
-        elapsed = time.time() - p.entry_time
-        pnl_pct = p.pnl_pct()
-
-        # TP y SL tienen su propia ventana de gracia, independiente entre sí:
-        # puedes, por ejemplo, dejar el SL activo casi desde el minuto uno
-        # (para cortar rug pulls rápido) mientras le das más margen al TP
-        # (para no vender demasiado pronto una subida que sigue corriendo).
-        if elapsed >= cfg.take_profit_grace_period_seconds and pnl_pct >= cfg.take_profit_pct:
-            return f"take-profit +{pnl_pct:.1f}%"
-        if elapsed >= cfg.stop_loss_grace_period_seconds and pnl_pct <= -cfg.stop_loss_pct:
-            return f"stop-loss {pnl_pct:.1f}%"
-        if elapsed >= cfg.max_hold_seconds:
-            return f"timeout {cfg.max_hold_seconds}s ({pnl_pct:+.1f}%)"
-        return None
-
     async def _close_position(self, mint: str, exit_reason: str):
         p = self.open_positions.pop(mint, None)
         if not p:
@@ -253,39 +263,200 @@ class SimulatedTradeExecutor(TradeExecutor):
 
 class RealTradeExecutor(TradeExecutor):
     """
-    ESQUELETO para ejecución REAL vía la Trading API de PumpPortal
-    (POST https://pumpportal.fun/api/trade-local o /api/trade, según el
-    modo Lightning/Local que elijas — revisa la doc antes de implementar).
+    Ejecución REAL vía la Local Transaction API de PumpPortal
+    (POST https://pumpportal.fun/api/trade-local): PumpPortal devuelve una
+    transacción SIN FIRMAR, la firmamos aquí mismo con `solders` usando la
+    clave privada del propio usuario (nunca sale del proceso) y la enviamos
+    nosotros mismos al RPC configurado (cfg.solana_rpc_url).
 
-    DELIBERADAMENTE NO ENVÍA TRANSACCIONES TODAVÍA. Antes de completar los
-    TODO de abajo, decide y ten resueltas estas cosas:
+    Requiere el paquete `solders` (ver requirements.txt): pip install solders
 
-      - Cómo cargas la clave privada de forma segura (variable de entorno,
-        vault, etc.) — NUNCA hardcodeada en el script ni subida a git.
-      - Slippage máximo aceptable y priority fee a usar en cada compra/venta.
-        En pump.fun el movimiento de precio es muy rápido; sin slippage
-        bien calibrado, tus transacciones pueden fallar constantemente
-        o ejecutarse mucho peor de lo esperado.
-      - Simulación previa de cada transacción (para detectar honeypots
-        antes de firmarla de verdad).
-      - Manejo de errores de red / transacción fallida sin duplicar compras.
-
-    El límite de capital total en riesgo simultáneo YA está resuelto a nivel
-    de la clase base (ver TradeExecutor._check_exposure_limits): tanto esta
-    clase como SimulatedTradeExecutor respetan cfg.max_concurrent_positions
-    y cfg.max_total_exposure_sol automáticamente.
-
-    Recomendación: corre SimulatedTradeExecutor un tiempo largo primero y
-    valida que positions_log.csv da un resultado que te convence antes de
-    siquiera empezar a rellenar esta clase.
+    Seguridad / comportamiento:
+      - La clave privada SOLO vive en memoria (nunca se loguea ni se escribe
+        a disco). Cárgala desde config.toml (que está en .gitignore) o mejor
+        aún desde una variable de entorno.
+      - Cada compra pasa primero por `_check_exposure_limits` (heredado de
+        TradeExecutor), igual que en modo simulado.
+      - El primer envío al RPC se hace CON preflight (simulación on-chain):
+        si la simulación falla (fondos insuficientes, honeypot, slippage
+        excedido, etc.) se aborta sin gastar nada y sin reintentar a ciegas.
+      - Si la simulación pasa, la transacción firmada se reenvía varias
+        veces (skip-preflight) mientras se consulta su estado — esto es
+        seguro: reenviar EXACTAMENTE los mismos bytes firmados no duplica
+        el trade, ya que Solana deduplica por firma. Es el patrón estándar
+        para maximizar la probabilidad de inclusión en un bloque.
+      - Si no se confirma dentro de cfg.tx_confirm_timeout_seconds, NO se
+        asume que falló: puede haber quedado pendiente en la red. Se loguea
+        la firma y el link de Solscan para que la revises a mano.
+      - amount_sol / position_tokens en el `Position` resultante son
+        aproximados (basados en el precio visto justo antes de comprar);
+        el fill real puede variar por el slippage permitido.
     """
+
+    TRADE_LOCAL_URL = "https://pumpportal.fun/api/trade-local"
 
     def __init__(self, config: Config, wallet_private_key: Optional[str] = None):
         super().__init__(config)
+        self._ensure_positions_csv_header()
+        self._http_session: Optional[aiohttp.ClientSession] = None
+
         self.wallet_private_key = wallet_private_key
-        if not wallet_private_key:
+        self._keypair = None
+        if wallet_private_key:
+            try:
+                from solders.keypair import Keypair
+                self._keypair = Keypair.from_base58_string(wallet_private_key)
+            except ImportError:
+                raise RuntimeError(
+                    "Falta el paquete 'solders' (necesario para RealTradeExecutor). "
+                    "Instálalo con: pip install solders"
+                )
+            except Exception as e:
+                raise RuntimeError(f"pumpportal_wallet_private no es una clave base58 válida: {e}")
+
+            pubkey = str(self._keypair.pubkey())
+            if config.pumpportal_wallet_public and config.pumpportal_wallet_public != pubkey:
+                logger.warning(
+                    f"[REAL] Aviso: pumpportal_wallet_public en config ({config.pumpportal_wallet_public}) "
+                    f"no coincide con la clave pública derivada de pumpportal_wallet_private ({pubkey}). "
+                    f"Se usará esta última."
+                )
+            self.wallet_public_key = pubkey
+            logger.warning(
+                f"[REAL] Modo REAL activo — wallet {pubkey}. Cada operación abierta gastará "
+                f"{config.buy_amount_sol} SOL de verdad. Slippage máx. {config.max_slippage_pct}% "
+                f"| priority fee {config.priority_fee_sol} SOL | pool '{config.trade_pool}'."
+            )
+        else:
+            self.wallet_public_key = None
             logger.warning("[REAL] Aviso: no se ha configurado wallet_private_key. "
                             "open_position() fallará hasta que la configures.")
+
+    # ------------------------------------------------------------------
+    # Infraestructura HTTP / RPC
+    # ------------------------------------------------------------------
+
+    async def _get_http_session(self) -> aiohttp.ClientSession:
+        if self._http_session is None or self._http_session.closed:
+            self._http_session = aiohttp.ClientSession()
+        return self._http_session
+
+    async def close(self):
+        """Cierra la sesión HTTP. Llamar al parar el bot."""
+        if self._http_session and not self._http_session.closed:
+            await self._http_session.close()
+
+    async def _rpc_call(self, method: str, params: list, timeout: float = 15.0) -> dict:
+        session = await self._get_http_session()
+        payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        try:
+            async with session.post(self.cfg.solana_rpc_url, json=payload,
+                                     timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                return await resp.json()
+        except Exception as e:
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    # ------------------------------------------------------------------
+    # Construcción, firma y envío de transacciones (compra Y venta)
+    # ------------------------------------------------------------------
+
+    async def _fetch_unsigned_tx(self, action: str, mint: str, amount, denominated_in_sol: bool):
+        """Pide a PumpPortal la transacción sin firmar. Devuelve los bytes
+        crudos de la transacción, o None si PumpPortal devolvió un error
+        (p.ej. JSON con 'errors' en vez de la transacción serializada)."""
+        session = await self._get_http_session()
+        body = {
+            "publicKey": self.wallet_public_key,
+            "action": action,
+            "mint": mint,
+            "amount": amount,
+            "denominatedInSol": "true" if denominated_in_sol else "false",
+            "slippage": self.cfg.max_slippage_pct,
+            "priorityFee": self.cfg.priority_fee_sol,
+            "pool": self.cfg.trade_pool,
+        }
+        try:
+            async with session.post(self.TRADE_LOCAL_URL, json=body,
+                                     timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                raw = await resp.read()
+                content_type = resp.headers.get("Content-Type", "")
+                if resp.status != 200 or "application/json" in content_type:
+                    # PumpPortal responde JSON solo cuando hay un error de validación
+                    logger.error(f"[REAL] PumpPortal rechazó la solicitud de {action} "
+                                 f"({resp.status}): {raw[:500]}")
+                    return None
+                return raw
+        except Exception as e:
+            logger.error(f"[REAL] Error de red pidiendo tx de {action} a PumpPortal: {e}")
+            return None
+
+    def _sign_tx(self, raw_tx_bytes: bytes):
+        from solders.transaction import VersionedTransaction
+        unsigned = VersionedTransaction.from_bytes(raw_tx_bytes)
+        return VersionedTransaction(unsigned.message, [self._keypair])
+
+    async def _send_and_confirm(self, signed_tx) -> Optional[str]:
+        """Envía la tx firmada y espera confirmación, reenviando (mismos
+        bytes, mismo signature) mientras no confirme y no expire el
+        blockhash. Devuelve el signature si confirmó, o None si no se pudo
+        confirmar dentro del timeout (no necesariamente significa que
+        falló: puede seguir viva en la red — se loguea el link a Solscan
+        para comprobarlo a mano)."""
+        signature = str(signed_tx.signatures[0])
+        tx_b64 = base64.b64encode(bytes(signed_tx)).decode("ascii")
+
+        # Primer envío: CON preflight, para pillar errores de simulación
+        # (fondos insuficientes, slippage excedido, honeypot, etc.) sin
+        # gastar ni reintentar a ciegas.
+        first = await self._rpc_call("sendTransaction", [
+            tx_b64, {"encoding": "base64", "skipPreflight": False,
+                     "preflightCommitment": "confirmed", "maxRetries": 0},
+        ])
+        if "error" in first:
+            logger.error(f"[REAL] Simulación/envío rechazado por el RPC: {first['error']}")
+            return None
+
+        deadline = time.time() + self.cfg.tx_confirm_timeout_seconds
+        while time.time() < deadline:
+            status = await self._rpc_call("getSignatureStatuses", [[signature],
+                                          {"searchTransactionHistory": True}])
+            value = (status.get("result") or {}).get("value") or [None]
+            info = value[0]
+            if info is not None:
+                if info.get("err") is not None:
+                    logger.error(f"[REAL] Transacción confirmada pero FALLÓ on-chain: "
+                                 f"{info['err']} — https://solscan.io/tx/{signature}")
+                    return None
+                if info.get("confirmationStatus") in ("confirmed", "finalized"):
+                    return signature
+
+            await asyncio.sleep(self.cfg.tx_confirm_poll_interval_seconds)
+            # Reenvío de los MISMOS bytes firmados: es seguro (Solana
+            # deduplica por firma) y aumenta la probabilidad de inclusión
+            # sin arriesgarse a duplicar el trade.
+            await self._rpc_call("sendTransaction", [
+                tx_b64, {"encoding": "base64", "skipPreflight": True, "maxRetries": 0},
+            ])
+
+        logger.warning(f"[REAL] No se confirmó en {self.cfg.tx_confirm_timeout_seconds:.0f}s "
+                        f"(puede seguir pendiente) — revisa https://solscan.io/tx/{signature}")
+        return None
+
+    async def _execute_trade(self, action: str, mint: str, amount,
+                              denominated_in_sol: bool) -> Optional[str]:
+        raw_tx = await self._fetch_unsigned_tx(action, mint, amount, denominated_in_sol)
+        if raw_tx is None:
+            return None
+        try:
+            signed = self._sign_tx(raw_tx)
+        except Exception as e:
+            logger.error(f"[REAL] No se pudo firmar la transacción de {action}: {e}")
+            return None
+        return await self._send_and_confirm(signed)
+
+    # ------------------------------------------------------------------
+    # Interfaz TradeExecutor
+    # ------------------------------------------------------------------
 
     async def open_position(self, candidate) -> bool:
         rejection = self._check_exposure_limits()
@@ -293,40 +464,90 @@ class RealTradeExecutor(TradeExecutor):
             logger.info(f"[REAL] Compra de {candidate.symbol} descartada: {rejection}.")
             return False
 
-        if not self.wallet_private_key:
+        if not self._keypair:
             logger.error(f"[REAL] Compra de {candidate.symbol} abortada: falta wallet_private_key.")
             return False
 
-        # TODO: aquí iría la llamada real, algo en la línea de:
-        #
-        # response = requests.post("https://pumpportal.fun/api/trade-local", data={
-        #     "publicKey": TU_WALLET_PUBLICA,
-        #     "action": "buy",
-        #     "mint": candidate.mint,
-        #     "amount": self.cfg.buy_amount_sol,
-        #     "denominatedInSol": "true",
-        #     "slippage": 10,           # % — ajusta según tu tolerancia real
-        #     "priorityFee": 0.0001,    # SOL — ajusta según congestión de red
-        #     "pool": "pump",
-        # })
-        # -> firmar la transacción devuelta con solders usando wallet_private_key
-        # -> enviarla al RPC y esperar confirmación
-        # -> solo si confirma, crear el Position real de verdad
-        #
-        # Hasta que implementes esto, lanzamos un error explícito en vez de
-        # fingir que compramos algo.
-        raise NotImplementedError(
-            "RealTradeExecutor.open_position() no está implementado todavía. "
-            "Revisa los TODO en esta clase antes de usarla con dinero real."
+        price = candidate.current_price
+        if not price:
+            logger.warning(f"[REAL] No se pudo comprar {candidate.symbol}: precio desconocido.")
+            return False
+
+        cfg = self.cfg
+        logger.info(f"[REAL COMPRA] Enviando orden de compra: {candidate.symbol} "
+                    f"({candidate.mint[:10]}...) — {cfg.buy_amount_sol} SOL...")
+        signature = await self._execute_trade(
+            "buy", candidate.mint, cfg.buy_amount_sol, denominated_in_sol=True
         )
+        if not signature:
+            logger.error(f"[REAL] Compra de {candidate.symbol} NO confirmada. No se abre posición.")
+            return False
+
+        position = Position(
+            mint=candidate.mint, symbol=candidate.symbol, entry_price=price,
+            amount_sol=cfg.buy_amount_sol, position_tokens=cfg.buy_amount_sol / price,
+            v_sol_in_curve=candidate.v_sol_in_curve, v_tokens_in_curve=candidate.v_tokens_in_curve,
+        )
+        self.open_positions[candidate.mint] = position
+        logger.info(f"[REAL COMPRA CONFIRMADA] {position.symbol} — ~{price:.10f} SOL/token "
+                    f"(precio real de fill puede variar por slippage) — "
+                    f"https://solscan.io/tx/{signature} → TP +{cfg.take_profit_pct}% "
+                    f"/ SL -{cfg.stop_loss_pct}%")
+        return True
 
     def handle_trade_message(self, msg: dict):
-        # El tracking de precio en vivo (para saber cuándo tocar TP/SL) puede
-        # reutilizar exactamente la misma lógica que SimulatedTradeExecutor
-        # una vez tengas Position rellenándose con datos reales; lo que
-        # cambia es SOLO cómo se ejecuta el cierre real (ver _close_position).
-        raise NotImplementedError
+        # Mismo tracking de precio en vivo que en modo simulado: solo cambia
+        # CÓMO se ejecuta el cierre real (ver _close_position).
+        mint = msg.get("mint")
+        position = self.open_positions.get(mint)
+        if not position:
+            return
+
+        position.update_from_trade(msg)
+        reason = self._check_exit_conditions(position)
+        if reason:
+            asyncio.create_task(self._close_position(mint, reason))
+        else:
+            position.trades_since_open += 1
+            if position.trades_since_open % self.cfg.position_status_every_n_trades == 0:
+                pnl_pct = position.pnl_pct()
+                if pnl_pct is not None:
+                    logger.info(f"[REAL ESTADO] {position.symbol} sigue abierta — "
+                                f"P&L actual: {pnl_pct:+.1f}% ({time.time() - position.entry_time:.0f}s)")
 
     async def _close_position(self, mint: str, exit_reason: str):
-        # TODO: mismo patrón que open_position pero con action="sell"
-        raise NotImplementedError
+        p = self.open_positions.get(mint)
+        if not p:
+            return
+
+        logger.info(f"[REAL VENTA] Enviando orden de venta: {p.symbol} ({p.mint[:10]}...) — "
+                    f"motivo: {exit_reason}...")
+        # Vendemos el 100% del balance de tokens en vez de una cantidad
+        # exacta: no trackeamos el balance real on-chain (puede diferir
+        # ligeramente de position_tokens por redondeos/decimales del
+        # token), así que "100%" es más robusto que arriesgarse a una
+        # venta parcial por pedir de más.
+        signature = await self._execute_trade("sell", mint, "100%", denominated_in_sol=False)
+
+        if not signature:
+            logger.error(f"[REAL] Venta de {p.symbol} NO confirmada. La posición SIGUE ABIERTA — "
+                         f"se reintentará en el próximo trade que llegue de este mint, o ciérrala "
+                         f"manualmente: https://pump.fun/{p.mint}")
+            return
+
+        # La posición se retira del tracking solo tras confirmar la venta
+        # on-chain, para no perder de vista una posición que en realidad
+        # sigue abierta si la venta falla.
+        self.open_positions.pop(mint, None)
+        price = p.current_price or p.entry_price
+        pnl_pct = ((price - p.entry_price) / p.entry_price) * 100
+        pnl_sol = self.cfg.buy_amount_sol * (pnl_pct / 100)
+
+        signo = "GANANCIA" if pnl_sol >= 0 else "PÉRDIDA"
+        logger.info(f"[REAL VENTA CONFIRMADA] {p.symbol} ({p.mint[:10]}...) — {exit_reason} — "
+                    f"{signo} aprox.: {pnl_pct:+.1f}% ({pnl_sol:+.5f} SOL) — "
+                    f"mantenido {int(time.time() - p.entry_time)}s — https://solscan.io/tx/{signature}")
+
+        self._append_position_csv(p, price, pnl_pct, pnl_sol, exit_reason, tx_signature=signature)
+        if self._unsubscribe_fn:
+            await self._unsubscribe_fn(mint)

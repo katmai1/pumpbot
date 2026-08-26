@@ -149,6 +149,8 @@ async def main(config: Config, real: bool=False):
     finally:
         scanner.print_shortlist(force=True)
         executor.print_open_positions_summary()
+        if hasattr(executor, "close"):
+            await executor.close()
         logger.info("Bot detenido.")
 
 
