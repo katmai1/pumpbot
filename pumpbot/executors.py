@@ -2,11 +2,14 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, Callable, Awaitable
 import time
-import os
 import asyncio
 import csv
+import logging
 
 from pumpbot.config import Config
+
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class Position:
@@ -113,12 +116,13 @@ class TradeExecutor(ABC):
     def print_open_positions_summary(self):
         if not self.open_positions:
             return
-        print(f"\n{'='*80}\nPOSICIONES ABIERTAS AL PARAR ({len(self.open_positions)})\n{'='*80}")
+        lines = [f"{'='*80}", f"POSICIONES ABIERTAS AL PARAR ({len(self.open_positions)})", f"{'='*80}"]
         for p in self.open_positions.values():
             pnl_pct = p.pnl_pct()
             pnl_str = f"P&L: {pnl_pct:+.1f}%" if pnl_pct is not None else "precio desconocido"
-            print(f"  {p.symbol:<10}  {pnl_str}  https://pump.fun/{p.mint}")
-        print(f"{'='*80}\n")
+            lines.append(f"  {p.symbol:<10}  {pnl_str}  https://pump.fun/{p.mint}")
+        lines.append("=" * 80)
+        logger.info("\n" + "\n".join(lines))
 
 
 class SimulatedTradeExecutor(TradeExecutor):
@@ -130,13 +134,12 @@ class SimulatedTradeExecutor(TradeExecutor):
         self._ensure_positions_csv_header()
 
     def _ensure_positions_csv_header(self):
-        if not os.path.exists(self.cfg.positions_csv_path):
-            with open(self.cfg.positions_csv_path, "w", newline="") as f:
-                csv.writer(f).writerow([
-                    "entry_time", "exit_time", "hold_seconds", "mint", "symbol",
-                    "entry_price_sol", "exit_price_sol", "pnl_pct", "pnl_sol",
-                    "exit_reason", "pumpfun_url",
-                ])
+        with open(self.cfg.positions_csv_path, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "entry_time", "exit_time", "hold_seconds", "mint", "symbol",
+                "entry_price_sol", "exit_price_sol", "pnl_pct", "pnl_sol",
+                "exit_reason", "pumpfun_url",
+            ])
 
     def _append_position_csv(self, p: Position, exit_price: float,
                               pnl_pct: float, pnl_sol: float, exit_reason: str):
@@ -151,12 +154,12 @@ class SimulatedTradeExecutor(TradeExecutor):
     async def open_position(self, candidate) -> bool:
         rejection = self._check_exposure_limits()
         if rejection:
-            print(f"[SIM] Compra de {candidate.symbol} descartada: {rejection}.")
+            logger.info(f"[SIM] Compra de {candidate.symbol} descartada: {rejection}.")
             return False
 
         price = candidate.current_price
         if not price:
-            print(f"[SIM] No se pudo abrir posición en {candidate.symbol}: precio desconocido.")
+            logger.warning(f"[SIM] No se pudo abrir posición en {candidate.symbol}: precio desconocido.")
             return False
 
         cfg = self.cfg
@@ -166,9 +169,9 @@ class SimulatedTradeExecutor(TradeExecutor):
             v_sol_in_curve=candidate.v_sol_in_curve, v_tokens_in_curve=candidate.v_tokens_in_curve,
         )
         self.open_positions[candidate.mint] = position
-        print(f"[SIM COMPRA] {position.symbol} ({position.mint[:10]}...) — {cfg.buy_amount_sol} SOL @ "
-              f"{price:.10f} SOL/token → TP +{cfg.take_profit_pct}% (gracia {cfg.take_profit_grace_period_seconds}s) "
-              f"/ SL -{cfg.stop_loss_pct}% (gracia {cfg.stop_loss_grace_period_seconds}s)")
+        logger.info(f"[SIM COMPRA] {position.symbol} ({position.mint[:10]}...) — {cfg.buy_amount_sol} SOL @ "
+                    f"{price:.10f} SOL/token → TP +{cfg.take_profit_pct}% (gracia {cfg.take_profit_grace_period_seconds}s) "
+                    f"/ SL -{cfg.stop_loss_pct}% (gracia {cfg.stop_loss_grace_period_seconds}s)")
 
         # la posición ya estaba suscrita a trades desde el scanner (para poder
         # evaluarla), así que no hace falta volver a suscribirse aquí
@@ -189,8 +192,8 @@ class SimulatedTradeExecutor(TradeExecutor):
             if position.trades_since_open % self.cfg.position_status_every_n_trades == 0:
                 pnl_pct = position.pnl_pct()
                 if pnl_pct is not None:
-                    print(f"[SIM ESTADO] {position.symbol} sigue abierta — "
-                          f"P&L actual: {pnl_pct:+.1f}% ({time.time() - position.entry_time:.0f}s)")
+                    logger.info(f"[SIM ESTADO] {position.symbol} sigue abierta — "
+                                f"P&L actual: {pnl_pct:+.1f}% ({time.time() - position.entry_time:.0f}s)")
 
     def _check_exit_conditions(self, p: Position) -> Optional[str]:
         cfg = self.cfg
@@ -222,8 +225,8 @@ class SimulatedTradeExecutor(TradeExecutor):
         pnl_sol = self.cfg.buy_amount_sol * (pnl_pct / 100)
 
         signo = "GANANCIA" if pnl_sol >= 0 else "PÉRDIDA"
-        print(f"[SIM VENTA] {p.symbol} ({p.mint[:10]}...) — {exit_reason} — "
-              f"{signo}: {pnl_pct:+.1f}% ({pnl_sol:+.5f} SOL) — mantenido {int(time.time() - p.entry_time)}s")
+        logger.info(f"[SIM VENTA] {p.symbol} ({p.mint[:10]}...) — {exit_reason} — "
+                    f"{signo}: {pnl_pct:+.1f}% ({pnl_sol:+.5f} SOL) — mantenido {int(time.time() - p.entry_time)}s")
 
         self._append_position_csv(p, price, pnl_pct, pnl_sol, exit_reason)
         if self._unsubscribe_fn:
@@ -263,17 +266,17 @@ class RealTradeExecutor(TradeExecutor):
         super().__init__(config)
         self.wallet_private_key = wallet_private_key
         if not wallet_private_key:
-            print("[REAL] Aviso: no se ha configurado wallet_private_key. "
-                  "open_position() fallará hasta que la configures.")
+            logger.warning("[REAL] Aviso: no se ha configurado wallet_private_key. "
+                            "open_position() fallará hasta que la configures.")
 
     async def open_position(self, candidate) -> bool:
         rejection = self._check_exposure_limits()
         if rejection:
-            print(f"[REAL] Compra de {candidate.symbol} descartada: {rejection}.")
+            logger.info(f"[REAL] Compra de {candidate.symbol} descartada: {rejection}.")
             return False
 
         if not self.wallet_private_key:
-            print(f"[REAL] Compra de {candidate.symbol} abortada: falta wallet_private_key.")
+            logger.error(f"[REAL] Compra de {candidate.symbol} abortada: falta wallet_private_key.")
             return False
 
         # TODO: aquí iría la llamada real, algo en la línea de:
