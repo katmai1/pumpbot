@@ -73,6 +73,12 @@ class TradeExecutor(ABC):
         self.open_positions: dict[str, Position] = {}
         self._subscribe_fn: Optional[SubscribeFn] = None
         self._unsubscribe_fn: Optional[SubscribeFn] = None
+        # Mints con un cierre de posición YA en curso (tarea de venta enviada,
+        # esperando confirmación). Evita que ráfagas de mensajes de trade
+        # que llegan mientras esa venta sigue "en vuelo" disparen ventas
+        # duplicadas concurrentes para el mismo mint — ver handle_trade_message
+        # de cada subclase y su uso de este set.
+        self._closing_mints: set[str] = set()
 
     def bind_subscription_callbacks(self, subscribe_fn: SubscribeFn, unsubscribe_fn: SubscribeFn):
         """El scanner llama a esto tras crear el executor, para darle forma de
@@ -504,8 +510,21 @@ class RealTradeExecutor(TradeExecutor):
             return
 
         position.update_from_trade(msg)
+
+        # Si ya hay una venta en curso para este mint (esperando confirmación
+        # on-chain, lo cual puede tardar varios segundos), NO lances otra:
+        # cada trade que llega mientras tanto seguiría viendo la posición
+        # "abierta" y volvería a detectar la misma condición de salida,
+        # inundando la red de ventas duplicadas (y pagando fee por cada
+        # una, incluso las que fallan on-chain por "vender saldo cero").
+        if mint in self._closing_mints:
+            return
+
         reason = self._check_exit_conditions(position)
         if reason:
+            self._closing_mints.add(mint)  # marcado ANTES de crear la tarea:
+            # así ningún mensaje de trade posterior, por rápido que llegue,
+            # puede colarse entre este punto y el arranque real de la tarea.
             asyncio.create_task(self._close_position(mint, reason))
         else:
             position.trades_since_open += 1
@@ -516,38 +535,44 @@ class RealTradeExecutor(TradeExecutor):
                                 f"P&L actual: {pnl_pct:+.1f}% ({time.time() - position.entry_time:.0f}s)")
 
     async def _close_position(self, mint: str, exit_reason: str):
-        p = self.open_positions.get(mint)
-        if not p:
-            return
+        try:
+            p = self.open_positions.get(mint)
+            if not p:
+                return
 
-        logger.info(f"[REAL VENTA] Enviando orden de venta: {p.symbol} ({p.mint[:10]}...) — "
-                    f"motivo: {exit_reason}...")
-        # Vendemos el 100% del balance de tokens en vez de una cantidad
-        # exacta: no trackeamos el balance real on-chain (puede diferir
-        # ligeramente de position_tokens por redondeos/decimales del
-        # token), así que "100%" es más robusto que arriesgarse a una
-        # venta parcial por pedir de más.
-        signature = await self._execute_trade("sell", mint, "100%", denominated_in_sol=False)
+            logger.info(f"[REAL VENTA] Enviando orden de venta: {p.symbol} ({p.mint[:10]}...) — "
+                        f"motivo: {exit_reason}...")
+            # Vendemos el 100% del balance de tokens en vez de una cantidad
+            # exacta: no trackeamos el balance real on-chain (puede diferir
+            # ligeramente de position_tokens por redondeos/decimales del
+            # token), así que "100%" es más robusto que arriesgarse a una
+            # venta parcial por pedir de más.
+            signature = await self._execute_trade("sell", mint, "100%", denominated_in_sol=False)
 
-        if not signature:
-            logger.error(f"[REAL] Venta de {p.symbol} NO confirmada. La posición SIGUE ABIERTA — "
-                         f"se reintentará en el próximo trade que llegue de este mint, o ciérrala "
-                         f"manualmente: https://pump.fun/{p.mint}")
-            return
+            if not signature:
+                logger.error(f"[REAL] Venta de {p.symbol} NO confirmada. La posición SIGUE ABIERTA — "
+                             f"se reintentará en el próximo trade que llegue de este mint, o ciérrala "
+                             f"manualmente: https://pump.fun/{p.mint}")
+                return
 
-        # La posición se retira del tracking solo tras confirmar la venta
-        # on-chain, para no perder de vista una posición que en realidad
-        # sigue abierta si la venta falla.
-        self.open_positions.pop(mint, None)
-        price = p.current_price or p.entry_price
-        pnl_pct = ((price - p.entry_price) / p.entry_price) * 100
-        pnl_sol = self.cfg.buy_amount_sol * (pnl_pct / 100)
+            # La posición se retira del tracking solo tras confirmar la venta
+            # on-chain, para no perder de vista una posición que en realidad
+            # sigue abierta si la venta falla.
+            self.open_positions.pop(mint, None)
+            price = p.current_price or p.entry_price
+            pnl_pct = ((price - p.entry_price) / p.entry_price) * 100
+            pnl_sol = self.cfg.buy_amount_sol * (pnl_pct / 100)
 
-        signo = "GANANCIA" if pnl_sol >= 0 else "PÉRDIDA"
-        logger.info(f"[REAL VENTA CONFIRMADA] {p.symbol} ({p.mint[:10]}...) — {exit_reason} — "
-                    f"{signo} aprox.: {pnl_pct:+.1f}% ({pnl_sol:+.5f} SOL) — "
-                    f"mantenido {int(time.time() - p.entry_time)}s — https://solscan.io/tx/{signature}")
+            signo = "GANANCIA" if pnl_sol >= 0 else "PÉRDIDA"
+            logger.info(f"[REAL VENTA CONFIRMADA] {p.symbol} ({p.mint[:10]}...) — {exit_reason} — "
+                        f"{signo} aprox.: {pnl_pct:+.1f}% ({pnl_sol:+.5f} SOL) — "
+                        f"mantenido {int(time.time() - p.entry_time)}s — https://solscan.io/tx/{signature}")
 
-        self._append_position_csv(p, price, pnl_pct, pnl_sol, exit_reason, tx_signature=signature)
-        if self._unsubscribe_fn:
-            await self._unsubscribe_fn(mint)
+            self._append_position_csv(p, price, pnl_pct, pnl_sol, exit_reason, tx_signature=signature)
+            if self._unsubscribe_fn:
+                await self._unsubscribe_fn(mint)
+        finally:
+            # Pase lo que pase (éxito, fallo, excepción) liberamos el candado:
+            # si la venta falló y la posición sigue abierta, el PRÓXIMO
+            # mensaje de trade debe poder reintentar el cierre.
+            self._closing_mints.discard(mint)
