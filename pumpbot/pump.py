@@ -8,7 +8,7 @@ import websockets
 from dataclasses import dataclass, field
 from typing import Optional
 
-from pumpbot.config import Config
+from .config import Config
 
 
 @dataclass
@@ -35,12 +35,25 @@ class TokenCandidate:
 
     v_sol_in_curve: float = 0.0
     v_tokens_in_curve: float = 0.0
+    price_ath: float = 0.0  # precio máximo visto DURANTE la observación (para
+                             # detectar entradas tardías sobre un token que ya
+                             # pegó su pico y está cayendo, aunque el ratio
+                             # compra/venta acumulado siga pareciendo sano)
 
     @property
     def current_price(self) -> Optional[float]:
         if self.v_tokens_in_curve <= 0:
             return None
         return self.v_sol_in_curve / self.v_tokens_in_curve
+
+    @property
+    def drawdown_from_ath_pct(self) -> Optional[float]:
+        """% de caída del precio actual respecto a su máximo visto (negativo =
+        ya cayó). None si todavía no hay datos de precio."""
+        price = self.current_price
+        if price is None or self.price_ath <= 0:
+            return None
+        return (price - self.price_ath) / self.price_ath * 100.0
 
     @property
     def buy_sell_ratio(self) -> float:
@@ -60,6 +73,9 @@ class TokenCandidate:
             self.v_sol_in_curve = float(v_sol)
         if v_tok is not None:
             self.v_tokens_in_curve = float(v_tok)
+        price = self.current_price
+        if price is not None and price > self.price_ath:
+            self.price_ath = price
             
 # ======================================================================
 # SCANNER: WebSocket, detección, filtro (no sabe nada de comprar/vender)
@@ -165,6 +181,12 @@ class PumpFunScanner:
             c.reasons_rejected.append(f"ratio compra/venta {ratio:.2f}")
         if not (cfg.min_bonding_curve_progress <= c.bonding_curve_progress <= cfg.max_bonding_curve_progress):
             c.reasons_rejected.append(f"progreso curva {c.bonding_curve_progress:.1f}%")
+
+        dd = c.drawdown_from_ath_pct
+        if dd is not None and dd < -cfg.max_drawdown_from_ath_pct:
+            c.reasons_rejected.append(
+                f"ya cayó {abs(dd):.1f}% desde su máximo (precio actual muy por debajo del pico)"
+            )
  
         c.passed = len(c.reasons_rejected) == 0
         if not c.passed and any("authority" in r for r in c.reasons_rejected):
@@ -187,15 +209,17 @@ class PumpFunScanner:
                 csv.writer(f).writerow([
                     "timestamp", "mint", "symbol", "name", "score", "passed",
                     "dev_initial_buy_pct", "unique_buyers", "buy_count", "sell_count",
-                    "bonding_curve_progress", "reasons_rejected", "pumpfun_url",
+                    "bonding_curve_progress", "drawdown_from_ath_pct", "reasons_rejected", "pumpfun_url",
                 ])
  
     def _append_candidate_csv(self, c: TokenCandidate):
+        dd = c.drawdown_from_ath_pct
         with open(self.cfg.candidates_csv_path, "a", newline="") as f:
             csv.writer(f).writerow([
                 int(time.time()), c.mint, c.symbol, c.name, c.score, c.passed,
                 round(c.dev_initial_buy_pct, 1), len(c.buyers), c.buy_count, c.sell_count,
-                round(c.bonding_curve_progress, 1), "; ".join(c.reasons_rejected),
+                round(c.bonding_curve_progress, 1), round(dd, 1) if dd is not None else "",
+                "; ".join(c.reasons_rejected),
                 f"https://pump.fun/{c.mint}",
             ])
  

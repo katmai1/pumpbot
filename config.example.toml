@@ -14,6 +14,8 @@ min_unique_buyers = 10
 min_buy_sell_ratio = 1.5
 min_bonding_curve_progress = 1.0
 max_bonding_curve_progress = 70.0
+max_drawdown_from_ath_pct = 20.0    # descarta si el precio ya cayó más de esto
+                                     # desde su máximo visto durante la observación
 
 [executor]
 buy_amount_sol = 0.01               # tamaño de la posición simulada (o real, si usas RealTradeExecutor)

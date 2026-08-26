@@ -24,6 +24,10 @@ class Config:
     min_buy_sell_ratio: float = 1.5
     min_bonding_curve_progress: float = 1.0
     max_bonding_curve_progress: float = 70.0
+    max_drawdown_from_ath_pct: float = 20.0  # descarta si el precio ya cayó
+        # más de esto desde su máximo visto durante la observación — evita
+        # entrar en un token que ya pegó su pico y viene cayendo, aunque el
+        # ratio compra/venta ACUMULADO desde su creación siga viéndose sano
  
     # --- ejecución de trades (executor) ---
     buy_amount_sol: float = 0.01
@@ -31,7 +35,6 @@ class Config:
     stop_loss_pct: float = 25.0
     stop_loss_grace_period_seconds: int = 15   # tras comprar, ignora el SL este tiempo
     take_profit_grace_period_seconds: int = 15 # tras comprar, ignora el TP este tiempo
-    grace_period_seconds: int = 15    # tras comprar, ignora TP/SL este tiempo
     max_hold_seconds: int = 3600      # cierre de seguridad si nunca toca TP/SL
     position_status_every_n_trades: int = 5
     max_concurrent_positions: int = 5     # nº máx. de posiciones abiertas a la vez
@@ -56,13 +59,13 @@ class Config:
         return f"https://mainnet.helius-rpc.com/?api-key={self.helius_api_key}"
  
     @classmethod
-    def from_toml(cls, path) -> "Config":
+    def from_toml(cls, path: str) -> "Config":
         """Carga la configuración desde un archivo TOML (ver config.example.toml
         como plantilla). El archivo real (config.toml) NUNCA debe subirse a git
         — está en el .gitignore que te dejé."""
         if not os.path.exists(path):
             raise RuntimeError(
-                f"No se encontró {path}. Copia config.example.toml a {path} "
+                f"No se encontró {path}. Copia config.example.toml a {path}"
                 f"y rellena tus valores reales (API key, RPC, etc.)."
             )
         with open(path, "rb") as f:
