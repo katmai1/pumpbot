@@ -38,6 +38,7 @@ class TokenCandidate:
 
     v_sol_in_curve: float = 0.0
     v_tokens_in_curve: float = 0.0
+    ath_price: Optional[float] = None  # precio máximo visto durante la observación
 
     @property
     def current_price(self) -> Optional[float]:
@@ -48,6 +49,16 @@ class TokenCandidate:
     @property
     def buy_sell_ratio(self) -> float:
         return (self.buy_count / self.sell_count) if self.sell_count > 0 else float("inf")
+
+    @property
+    def drawdown_from_ath_pct(self) -> Optional[float]:
+        """% de caída del precio actual respecto al máximo (ATH) visto
+        durante la ventana de observación. None si aún no hay datos
+        suficientes para calcularlo."""
+        price = self.current_price
+        if price is None or not self.ath_price:
+            return None
+        return ((self.ath_price - price) / self.ath_price) * 100
 
     def update_from_trade(self, msg: dict):
         if msg.get("txType") == "buy":
@@ -63,6 +74,10 @@ class TokenCandidate:
             self.v_sol_in_curve = float(v_sol)
         if v_tok is not None:
             self.v_tokens_in_curve = float(v_tok)
+
+        price = self.current_price
+        if price is not None and (self.ath_price is None or price > self.ath_price):
+            self.ath_price = price
 
 # ======================================================================
 # SCANNER: WebSocket, detección, filtro (no sabe nada de comprar/vender)
@@ -175,6 +190,12 @@ class PumpFunScanner:
         if not (cfg.min_bonding_curve_progress <= c.bonding_curve_progress <= cfg.max_bonding_curve_progress):
             c.reasons_rejected.append(f"progreso curva {c.bonding_curve_progress:.1f}%")
 
+        drawdown = c.drawdown_from_ath_pct
+        if drawdown is not None and drawdown > cfg.max_drawdown_from_ath_pct:
+            c.reasons_rejected.append(
+                f"cayó {drawdown:.1f}% desde su máximo (ATH {c.ath_price:.10f} SOL/token)"
+            )
+
         c.passed = len(c.reasons_rejected) == 0
         if not c.passed and any("authority" in r for r in c.reasons_rejected):
             c.score = 0.0
@@ -243,6 +264,21 @@ class PumpFunScanner:
 
     async def _unsubscribe_trade(self, mint: str):
         await self._ws.send(json.dumps({"method": "unsubscribeTokenTrade", "keys": [mint]}))
+
+    async def _resubscribe_active_mints(self):
+        """Tras (re)conectar hay que volver a suscribirse a los trades de
+        los mints que ya estaban siendo trackeados: candidatos aún en
+        ventana de observación y posiciones ya abiertas. Un WebSocket
+        nuevo (tras una caída de conexión) no conserva ninguna
+        suscripción anterior — sin esto, esos mints se quedarían sin
+        recibir más precio para siempre y una posición abierta nunca
+        llegaría a cerrar por TP/SL/timeout."""
+        mints = set(self.tracked_candidates.keys()) | set(self.executor.open_positions.keys())
+        if not mints:
+            return
+        logger.info(f"Resuscribiendo a {len(mints)} mint(s) tras (re)conexión...")
+        for mint in mints:
+            await self._subscribe_trade(mint)
 
     # ------------------------------------------------------------------
     # Apagado ordenado
@@ -474,6 +510,8 @@ class PumpFunScanner:
                             f"{self.cfg.observation_window_seconds}s, disparo anticipado "
                             f"desde {self.cfg.early_trigger_min_seconds}s. "
                             f"Log en {self.cfg.candidates_csv_path}")
+
+            await self._resubscribe_active_mints()
 
             async for raw in ws:
                 try:
