@@ -13,6 +13,8 @@ class Config:
     # aquí tu key ni tu RPC real, y NUNCA los pegues en un chat, log o repo.
     pumpportal_api_key: str = ""
     helius_api_key: str = ""
+    pumpportal_wallet_private: str = ""
+    pumpportal_wallet_public: str = ""
  
     # --- ventanas de tiempo (filtro / scanner) ---
     observation_window_seconds: int = 60   # límite MÁXIMO antes de descartar (fallback)

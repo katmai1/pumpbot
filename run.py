@@ -44,7 +44,7 @@ import signal
 
 from pumpbot.config import Config, _mask_key
 from pumpbot.pump import PumpFunScanner
-from pumpbot.executors import SimulatedTradeExecutor
+from pumpbot.executors import SimulatedTradeExecutor, RealTradeExecutor
 
 logger = logging.getLogger("pumpbot")
 
@@ -62,6 +62,12 @@ def configure_parser():
         help="Activa el modo verbose"
     )
 
+    parser.add_argument(
+        "--real",
+        action="store_true",
+        help="Activa el modo real. ABRIRÁ POSICIONES REALES"
+    )
+    
     return parser.parse_args()
 
 
@@ -130,8 +136,11 @@ def install_shutdown_handlers(scanner: PumpFunScanner):
             pass  # p.ej. SIGTERM no siempre se puede registrar según la plataforma
 
 
-async def main(config: Config):
-    executor = SimulatedTradeExecutor(config)
+async def main(config: Config, real: bool=False):
+    if real:
+        executor = RealTradeExecutor(config, config.pumpportal_wallet_private)
+    else:
+        executor = SimulatedTradeExecutor(config)
     scanner = PumpFunScanner(config, executor)
     install_shutdown_handlers(scanner)
 
@@ -152,7 +161,7 @@ if __name__ == "__main__":
     setup_logging(config.verbose)
 
     logger.info("=" * 70)
-    logger.info("SIMULACIÓN (PAPERTRADING) — NO SE EJECUTA NINGUNA COMPRA/VENTA REAL.")
+    logger.info(f"Modo: {"Real" if args.real else "Simulado"}")
     logger.info(f"API key: {_mask_key(config.pumpportal_api_key)}  |  RPC: {config.solana_rpc_url[:30]}...")
     logger.info(f"Posición simulada: {config.buy_amount_sol} SOL | TP +{config.take_profit_pct}% "
                 f"(gracia {config.take_profit_grace_period_seconds}s) | "
@@ -167,7 +176,7 @@ if __name__ == "__main__":
     # el día que hayas completado los TODO de esa clase y estés listo para
     # operar con dinero real. Hasta entonces, todo es papertrading.
     try:
-        asyncio.run(main(config))
+        asyncio.run(main(config, args.real))
     except KeyboardInterrupt:
         # Red de seguridad por si la señal llega antes de que el loop esté
         # listo para registrar el handler (arranque muy temprano): en ese
