@@ -110,6 +110,7 @@ class PumpFunScanner:
         # WebSocket para las posiciones ya abiertas hasta que toquen su
         # TP/SL/timeout. Ver request_shutdown().
         self._shutting_down = False
+        self._force_shutting_down = False
 
         self._ensure_candidates_csv_header()
 
@@ -320,6 +321,40 @@ class PumpFunScanner:
             logger.warning(f"No se pudo desuscribir de nuevos tokens: {e}")
 
         if not self.executor.open_positions:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+
+    def force_shutdown(self):
+        """Apagado FORZADO: pensado para una segunda señal (Ctrl+C) cuando
+        ya se pidió un apagado ordenado y no se quiere seguir esperando a
+        que las posiciones abiertas toquen TP/SL/timeout.
+
+        A diferencia de cancelar todas las tareas a lo bruto (lo que antes
+        producía un CancelledError sin más y dejaba las posiciones sin
+        vender), esto vende YA cada posición abierta al último precio
+        conocido y luego cierra limpiamente.
+
+        Igual que request_shutdown, está pensada para llamarse desde un
+        signal handler síncrono, y es idempotente."""
+        if self._force_shutting_down:
+            return
+        self._force_shutting_down = True
+        self._shutting_down = True  # por si la primera señal no llegó a marcarlo
+        asyncio.create_task(self._force_shutdown_sequence())
+
+    async def _force_shutdown_sequence(self):
+        n_open = len(self.executor.open_positions)
+        if n_open:
+            logger.warning(f"Segunda señal recibida: vendiendo ahora mismo "
+                            f"{n_open} posición(es) abierta(s) al precio actual, "
+                            f"sin esperar TP/SL/timeout...")
+            await self.executor.force_close_all_positions("cierre manual (Ctrl+C x2)")
+        else:
+            logger.warning("Segunda señal recibida. No hay posiciones abiertas.")
+
+        if self._ws is not None:
             try:
                 await self._ws.close()
             except Exception:

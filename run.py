@@ -79,9 +79,10 @@ def setup_logging(verbose: bool):
 
 def install_shutdown_handlers(scanner: PumpFunScanner):
     """Registra SIGINT/SIGTERM para pedir un apagado ordenado al scanner.
-    Una segunda señal cancela todas las tareas en curso para forzar la
-    salida inmediata (por si alguna posición se queda colgada esperando
-    un stop que no llega).
+    Una segunda señal fuerza la venta INMEDIATA de cualquier posición
+    abierta al último precio conocido (sin esperar a que toque TP, SL
+    ni timeout) y termina el programa — en vez de cancelar tareas a lo
+    bruto, que dejaba un traceback feo y las posiciones sin vender.
 
     `loop.add_signal_handler` es la forma "nativa" de asyncio para esto,
     pero Windows no la soporta en absoluto (ni con SelectorEventLoop ni
@@ -105,18 +106,12 @@ def install_shutdown_handlers(scanner: PumpFunScanner):
     loop = asyncio.get_running_loop()
     state = {"signal_count": 0}
 
-    def _force_cancel_all():
-        logger.warning("Segunda señal recibida: forzando salida inmediata "
-                        "(puede dejar posiciones abiertas sin cerrar).")
-        for task in asyncio.all_tasks(loop):
-            task.cancel()
-
     def _on_shutdown_signal(*_args):
         state["signal_count"] += 1
         if state["signal_count"] == 1:
             loop.call_soon_threadsafe(scanner.request_shutdown)
         else:
-            loop.call_soon_threadsafe(_force_cancel_all)
+            loop.call_soon_threadsafe(scanner.force_shutdown)
 
     registered_natively = set()
     for sig in (signal.SIGINT, signal.SIGTERM):

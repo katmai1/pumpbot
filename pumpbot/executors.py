@@ -113,6 +113,24 @@ class TradeExecutor(ABC):
         scanner no filtra por ti); el executor decide si le interesa ese mint."""
         raise NotImplementedError
 
+    async def force_close_all_positions(self, reason: str):
+        """Cierra TODAS las posiciones abiertas ya mismo, al último precio
+        conocido de cada una (sin esperar a que toquen TP/SL/timeout).
+        Pensada para un apagado forzado (segunda señal Ctrl+C).
+
+        Reutiliza `_close_position` de la subclase concreta, así que el
+        registro en el CSV y los logs de venta son exactamente los mismos
+        que en un cierre normal — solo cambia el motivo."""
+        for mint in list(self.open_positions.keys()):
+            try:
+                await self._close_position(mint, reason)
+            except NotImplementedError:
+                logger.error(f"No se puede vender automáticamente la posición en {mint}: "
+                             f"la venta real no está implementada todavía. "
+                             f"Ciérrala manualmente: https://pump.fun/{mint}")
+            except Exception as e:
+                logger.error(f"Error al forzar el cierre de la posición {mint}: {e}")
+
     def print_open_positions_summary(self):
         if not self.open_positions:
             return
