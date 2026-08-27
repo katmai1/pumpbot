@@ -44,7 +44,7 @@ import signal
 
 from pumpbot.config import Config, _mask_key
 from pumpbot.pump import PumpFunScanner
-from pumpbot.executors import SimulatedTradeExecutor, RealTradeExecutor
+from pumpbot.executors import SimulatedTradeExecutor, RealTradeExecutor, LightningTradeExecutor
 
 logger = logging.getLogger("pumpbot")
 
@@ -64,8 +64,13 @@ def configure_parser():
 
     parser.add_argument(
         "--real",
-        action="store_true",
-        help="Activa el modo real. ABRIRÁ POSICIONES REALES"
+        nargs="?", const="local", default=None, choices=["local", "lightning"],
+        help="Activa el modo real. ABRIRÁ POSICIONES REALES. "
+             "'--real' o '--real local' usa la Local Transaction API de PumpPortal "
+             "(firmas tú mismo con pumpportal_wallet_private, custodia propia). "
+             "'--real lightning' usa la Lightning API (PumpPortal firma y envía por ti "
+             "con la wallet ligada a pumpportal_api_key — fee del doble, 1%% vs 0.5%%, "
+             "y custodia de PumpPortal en vez de tuya)."
     )
     
     return parser.parse_args()
@@ -136,9 +141,11 @@ def install_shutdown_handlers(scanner: PumpFunScanner):
             pass  # p.ej. SIGTERM no siempre se puede registrar según la plataforma
 
 
-async def main(config: Config, real: bool=False):
-    if real:
+async def main(config: Config, real_mode: str | None = None):
+    if real_mode == "local":
         executor = RealTradeExecutor(config, config.pumpportal_wallet_private)
+    elif real_mode == "lightning":
+        executor = LightningTradeExecutor(config)
     else:
         executor = SimulatedTradeExecutor(config)
     scanner = PumpFunScanner(config, executor)
@@ -163,7 +170,7 @@ if __name__ == "__main__":
     setup_logging(config.verbose)
 
     logger.info("=" * 70)
-    logger.info(f"Modo: {"Real" if args.real else "Simulado"}")
+    logger.info(f"Modo: {'Real (Local)' if args.real == 'local' else 'Real (Lightning)' if args.real == 'lightning' else 'Simulado'}")
     logger.info(f"API key: {_mask_key(config.pumpportal_api_key)}  |  RPC: {config.solana_rpc_url[:30]}...")
     logger.info(f"Posición simulada: {config.buy_amount_sol} SOL | TP +{config.take_profit_pct}% "
                 f"(gracia {config.take_profit_grace_period_seconds}s) | "

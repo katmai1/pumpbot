@@ -3,13 +3,24 @@
 # (ya está en el .gitignore).
 
 [credentials]
+# pumpportal_api_key se usa para el feed de datos (WebSocket) Y, si corres
+# con --real lightning, también para autenticar cada trade de la Lightning
+# Transaction API — es el mismo key que generas junto a tu wallet Lightning
+# en https://pumpportal.fun/trading-api/setup.
 pumpportal_api_key = "tu_api_key_real_aqui"
 helius_api_key = "tu_helius_key_aqui"
-# Solo necesarios si vas a usar --real (RealTradeExecutor / Local Transaction API).
-# pumpportal_wallet_private es tu clave privada en base58 (la de un keypair de
-# Solana normal, NO la credencial del Lightning Wallet de PumpPortal).
+# pumpportal_wallet_private: SOLO para --real local (Local Transaction API).
+# Es tu clave privada en base58 (la de un keypair de Solana normal — la
+# generas tú, con solders o cualquier wallet — NO la credencial de un
+# Lightning Wallet de PumpPortal, que es otra cosa distinta).
 # NUNCA la subas a git ni la compartas — quien la tenga controla los fondos.
 pumpportal_wallet_private = ""
+# pumpportal_wallet_public: la dirección pública correspondiente. Con
+# --real local se deriva sola de la privada (esto es solo para verificar
+# que coincide); con --real lightning es OBLIGATORIA — es la wallet que
+# genera pumpportal.fun/trading-api/setup junto con el api-key, y la
+# necesitamos para poder leer el fill real de cada tx desde tu propio RPC
+# (ver RealTradeExecutor/LightningTradeExecutor._get_trade_fill).
 pumpportal_wallet_public = ""
 
 [scanner]
@@ -34,12 +45,12 @@ position_status_every_n_trades = 5  # frecuencia del print de P&L en vivo
 max_concurrent_positions = 5        # nº máx. de posiciones abiertas a la vez
 max_total_exposure_sol = 0.05       # SOL máx. sumando TODAS las posiciones abiertas a la vez
 
-# --- solo aplica si corres con --real (RealTradeExecutor) ---
+# --- solo se usan con --real local o --real lightning ---
 max_slippage_pct = 10.0             # % de slippage máx. aceptado en compra/venta
-priority_fee_sol = 0.0005           # SOL de priority fee por transacción
+priority_fee_sol = 0.0005           # SOL de priority fee por transacción (ajusta según congestión)
 trade_pool = "auto"                 # 'pump', 'raydium', 'pump-amm', 'auto', etc.
-tx_confirm_timeout_seconds = 10.0   # tiempo máx. esperando confirmación on-chain
-tx_confirm_poll_interval_seconds = 2.0
+tx_confirm_timeout_seconds = 45.0   # tiempo máx. esperando confirmación on-chain antes de darla por perdida
+tx_confirm_poll_interval_seconds = 2.0  # frecuencia de sondeo de getSignatureStatuses
 
 [pumpfun]
 total_supply = 1000000000           # supply estándar de un token de pump.fun

@@ -42,19 +42,12 @@ class Config:
     max_concurrent_positions: int = 5     # nº máx. de posiciones abiertas a la vez
     max_total_exposure_sol: float = 0.05  # SOL máx. sumando TODAS las posiciones abiertas
 
-    # --- solo RealTradeExecutor: parámetros de envío de transacciones ---
+    # --- solo RealTradeExecutor / LightningTradeExecutor (PumpPortal) ---
     max_slippage_pct: float = 10.0        # % de slippage máximo aceptado en compra/venta
     priority_fee_sol: float = 0.0005      # SOL de priority fee por transacción
     trade_pool: str = "auto"              # 'pump', 'raydium', 'pump-amm', 'auto', etc.
     tx_confirm_timeout_seconds: float = 45.0    # tiempo máx. esperando confirmación on-chain
     tx_confirm_poll_interval_seconds: float = 2.0  # frecuencia de reintento/consulta de estado
-
-    # --- solo RealTradeExecutor (PumpPortal Local Transaction API) ---
-    max_slippage_pct: float = 10.0     # % de slippage máximo aceptado en compra/venta
-    priority_fee_sol: float = 0.0005   # priority fee en SOL por transacción
-    trade_pool: str = "auto"           # 'pump', 'raydium', 'pump-amm', 'auto', etc.
-    tx_confirm_timeout_seconds: int = 45     # tiempo máx. esperando confirmación on-chain
-    tx_confirm_poll_interval_seconds: float = 2.0  # frecuencia de sondeo de getSignatureStatuses
  
     # --- constantes del propio pump.fun ---
     total_supply: float = 1_000_000_000
